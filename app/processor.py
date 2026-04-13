@@ -4,7 +4,7 @@ from google.cloud import storage
 
 logger = logging.getLogger(__name__)
 
-VALID_EXTENSIONS = {".csvx", ".txt", ".xml", ".json"}
+VALID_EXTENSIONS = {".csv", ".txt", ".xml", ".json"}
 INPUT_BUCKET  = os.environ["INPUT_BUCKET"]
 OUTPUT_BUCKET = os.environ["OUTPUT_BUCKET"]
 
