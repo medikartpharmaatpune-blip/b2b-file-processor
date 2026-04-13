@@ -1,0 +1,116 @@
+name: CI/CD — build, test, deploy
+
+# Trigger: run on every push to main
+# Also run on pull requests to main (test only, no deploy)
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  IMAGE_NAME: medikart/b2b-processor
+  HELM_RELEASE: b2b-dev
+  HELM_CHART: ./helm/b2b-processor
+
+jobs:
+
+  # ── Job 1: test ────────────────────────────────────────────────────────
+  # Runs on every push and PR
+  # If this fails, nothing else runs — tests are the gate
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: pip-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pytest
+        run: pytest tests/ -v --tb=short
+
+  # ── Job 2: build and push image ────────────────────────────────────────
+  # Only runs on push to main (not on PRs)
+  # Only runs if tests passed
+  build:
+    name: Build and push Docker image
+    runs-on: ubuntu-latest
+    needs: test                          # wait for test job to pass
+    if: github.event_name == 'push'      # skip on pull requests
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Generate image tag
+        id: meta
+        run: |
+          SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          echo "tag=sha-${SHA}" >> $GITHUB_OUTPUT
+          echo "Image tag: sha-${SHA}"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}
+            ${{ env.IMAGE_NAME }}:latest
+
+  # ── Job 3: deploy ──────────────────────────────────────────────────────
+  # Runs on self-hosted runner (your machine with minikube)
+  # Only after build succeeds
+  # On Day 4: swap runs-on to ubuntu-latest and target GKE instead
+  deploy:
+    name: Deploy to minikube
+    runs-on: self-hosted                 # YOUR machine — has kubectl + helm
+    needs: build
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Load new image into minikube
+        run: |
+          eval $(minikube docker-env)
+          docker pull ${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image_tag }}
+          minikube image load ${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image_tag }}
+
+      - name: Helm upgrade
+        run: |
+          helm upgrade ${{ env.HELM_RELEASE }} ${{ env.HELM_CHART }} \
+            --set image.tag=${{ needs.build.outputs.image_tag }} \
+            --set image.pullPolicy=Never \
+            --wait \
+            --timeout 120s
+
+      - name: Verify rollout
+        run: |
+          kubectl rollout status deployment/b2b-dev-processor --timeout=60s
+          kubectl get pods -l app=b2b-dev-processor
