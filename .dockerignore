@@ -1,0 +1,14 @@
+# Never copy these into the image
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.git/
+.gitignore
+*.md
+tests/
+.env
+.env.*
+terraform/
+helm/
+.github/

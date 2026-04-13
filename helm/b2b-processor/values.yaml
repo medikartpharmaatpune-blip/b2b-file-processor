@@ -1,0 +1,32 @@
+image:
+  repository: medikart/b2b-processor
+  tag: v1.0.1
+  pullPolicy: Never
+
+replicaCount: 1
+
+config:
+  projectId: my-project
+  pubsubSubscription: file-events-sub
+  inputBucket: my-input-bucket
+  outputBucket: my-output-bucket
+  pubsubEmulatorHost: pubsub-emulator:8085
+  storageEmulatorHost: gcs-emulator:4443
+
+resources:
+  requests:
+    memory: "128Mi"
+    cpu: "100m"
+  limits:
+    memory: "256Mi"
+    cpu: "500m"
+
+probes:
+  liveness:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    failureThreshold: 2

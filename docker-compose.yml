@@ -1,0 +1,75 @@
+version: "3.9"
+
+services:
+
+  pubsub-emulator:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: gcloud beta emulators pubsub start --host-port=0.0.0.0:8085
+    ports:
+      - "8085:8085"
+
+  gcs-emulator:
+    image: fsouza/fake-gcs-server:latest
+    command: -scheme http -port 4443 -backend memory
+    ports:
+      - "4443:4443"
+
+  setup:
+    image: curlimages/curl:latest
+    depends_on:
+      - pubsub-emulator
+      - gcs-emulator
+    restart: on-failure
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+
+        echo "Waiting for Pub/Sub emulator..."
+        until curl -sf http://pubsub-emulator:8085; do
+          sleep 2
+        done
+
+        echo "Waiting for GCS emulator..."
+        until curl -sf http://gcs-emulator:4443/storage/v1/b; do
+          sleep 2
+        done
+
+        echo "Creating Pub/Sub topic..."
+        curl -sf -X PUT \
+          "http://pubsub-emulator:8085/v1/projects/my-project/topics/file-events"
+
+        echo "Creating Pub/Sub subscription..."
+        curl -sf -X PUT \
+          "http://pubsub-emulator:8085/v1/projects/my-project/subscriptions/file-events-sub" \
+          -H "Content-Type: application/json" \
+          -d '{"topic":"projects/my-project/topics/file-events","ackDeadlineSeconds":20}'
+
+        echo "Creating input bucket..."
+        curl -sf -X POST \
+          "http://gcs-emulator:4443/storage/v1/b" \
+          -H "Content-Type: application/json" \
+          -d '{"name":"my-input-bucket"}'
+
+        echo "Creating output bucket..."
+        curl -sf -X POST \
+          "http://gcs-emulator:4443/storage/v1/b" \
+          -H "Content-Type: application/json" \
+          -d '{"name":"my-output-bucket"}'
+
+        echo "Setup complete."
+
+  processor:
+    build: .
+    depends_on:
+      - setup
+    ports:
+      - "8080:8080"
+    environment:
+      GCP_PROJECT_ID:        my-project
+      PUBSUB_SUBSCRIPTION:   file-events-sub
+      INPUT_BUCKET:          my-input-bucket
+      OUTPUT_BUCKET:         my-output-bucket
+      PUBSUB_EMULATOR_HOST:  pubsub-emulator:8085
+      STORAGE_EMULATOR_HOST: gcs-emulator:4443
+    restart: on-failure
