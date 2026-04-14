@@ -1,17 +1,26 @@
 image:
-  repository: medikart/b2b-processor
-  tag: v1.0.1
-  pullPolicy: Never
+  repository: us-central1-docker.pkg.dev/project-97486c39-bcfe-41e5-9e8/b2b-processor/b2b-processor
+  tag: latest
+  pullPolicy: Always    # Always pull from Artifact Registry on GKE
 
 replicaCount: 1
 
 config:
-  projectId: my-project
-  pubsubSubscription: file-events-sub
-  inputBucket: my-input-bucket
-  outputBucket: my-output-bucket
-  pubsubEmulatorHost: pubsub-emulator:8085
-  storageEmulatorHost: gcs-emulator:4443
+  projectId: project-97486c39-bcfe-41e5-9e8
+  pubsubSubscription: b2b-file-events-sub-dev
+  inputBucket: project-97486c39-bcfe-41e5-9e8-b2b-input-dev
+  outputBucket: project-97486c39-bcfe-41e5-9e8-b2b-output-dev
+  # No emulator hosts — real GCP services used on GKE
+  pubsubEmulatorHost: ""
+  storageEmulatorHost: ""
+
+# Workload Identity — annotate the K8s service account
+# so pods authenticate to GCP without key files
+serviceAccount:
+  create: true
+  name: b2b-processor
+  annotations:
+    iam.gke.io/gcp-service-account: b2b-processor-dev@project-97486c39-bcfe-41e5-9e8.iam.gserviceaccount.com
 
 resources:
   requests:

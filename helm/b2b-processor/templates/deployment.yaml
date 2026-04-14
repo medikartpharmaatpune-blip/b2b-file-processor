@@ -15,6 +15,7 @@ spec:
       labels:
         app: {{ .Release.Name }}-processor
     spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
       containers:
         - name: processor
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -30,10 +31,14 @@ spec:
               value: "{{ .Values.config.inputBucket }}"
             - name: OUTPUT_BUCKET
               value: "{{ .Values.config.outputBucket }}"
+            {{- if .Values.config.pubsubEmulatorHost }}
             - name: PUBSUB_EMULATOR_HOST
               value: "{{ .Values.config.pubsubEmulatorHost }}"
+            {{- end }}
+            {{- if .Values.config.storageEmulatorHost }}
             - name: STORAGE_EMULATOR_HOST
               value: "{{ .Values.config.storageEmulatorHost }}"
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           livenessProbe:

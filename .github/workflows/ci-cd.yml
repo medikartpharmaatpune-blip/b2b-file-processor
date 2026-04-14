@@ -1,7 +1,5 @@
 name: CI/CD — build, test, deploy
 
-# Trigger: run on every push to main
-# Also run on pull requests to main (test only, no deploy)
 on:
   push:
     branches: [main]
@@ -9,34 +7,32 @@ on:
     branches: [main]
 
 env:
-  IMAGE_NAME: medikart/b2b-processor
-  HELM_RELEASE: b2b-dev
+  PROJECT_ID: project-97486c39-bcfe-41e5-9e8
+  REGION: us-central1
+  REGISTRY: us-central1-docker.pkg.dev/project-97486c39-bcfe-41e5-9e8/b2b-processor
+  IMAGE_NAME: b2b-processor
+  HELM_RELEASE: b2b-prod
   HELM_CHART: ./helm/b2b-processor
+  GKE_CLUSTER: b2b-cluster-dev
 
 jobs:
 
-  # ── Job 1: test ────────────────────────────────────────────────────────
-  # Runs on every push and PR
-  # If this fails, nothing else runs — tests are the gate
   test:
     name: Run tests
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Cache pip dependencies
+      - name: Cache pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: pip-
 
       - name: Install dependencies
         run: pip install -r requirements.txt
@@ -44,73 +40,83 @@ jobs:
       - name: Run pytest
         run: pytest tests/ -v --tb=short
 
-  # ── Job 2: build and push image ────────────────────────────────────────
-  # Only runs on push to main (not on PRs)
-  # Only runs if tests passed
   build:
     name: Build and push Docker image
     runs-on: ubuntu-latest
-    needs: test                          # wait for test job to pass
-    if: github.event_name == 'push'      # skip on pull requests
+    needs: test
+    if: github.event_name == 'push'
+
+    # Required for Workload Identity Federation
+    permissions:
+      contents: read
+      id-token: write
 
     outputs:
       image_tag: ${{ steps.meta.outputs.tag }}
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Generate image tag
         id: meta
         run: |
           SHA=$(echo ${{ github.sha }} | cut -c1-7)
           echo "tag=sha-${SHA}" >> $GITHUB_OUTPUT
-          echo "Image tag: sha-${SHA}"
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+      - name: Authenticate to GCP (keyless)
+        uses: google-github-actions/auth@v2
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
 
-      - name: Build and push
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and push to Artifact Registry
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
           tags: |
-            ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}
-            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
 
-  # ── Job 3: deploy ──────────────────────────────────────────────────────
-  # Runs on self-hosted runner (your machine with minikube)
-  # Only after build succeeds
-  # On Day 4: swap runs-on to ubuntu-latest and target GKE instead
   deploy:
-    name: Deploy to minikube
-    runs-on: self-hosted                 # YOUR machine — has kubectl + helm
+    name: Deploy to GKE
+    runs-on: ubuntu-latest
     needs: build
     if: github.event_name == 'push'
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+    permissions:
+      contents: read
+      id-token: write
 
-      - name: Load new image into minikube
-        run: |
-          eval $(minikube docker-env)
-          docker pull ${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image_tag }}
-          minikube image load ${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP (keyless)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.REGION }}
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
 
       - name: Helm upgrade
         run: |
-          helm upgrade ${{ env.HELM_RELEASE }} ${{ env.HELM_CHART }} \
+          helm upgrade --install ${{ env.HELM_RELEASE }} ${{ env.HELM_CHART }} \
             --set image.tag=${{ needs.build.outputs.image_tag }} \
-            --set image.pullPolicy=Never \
             --wait \
-            --timeout 120s
+            --timeout 180s
 
       - name: Verify rollout
         run: |
-          kubectl rollout status deployment/b2b-dev-processor --timeout=60s
-          kubectl get pods -l app=b2b-dev-processor
+          kubectl rollout status deployment/${{ env.HELM_RELEASE }}-processor --timeout=120s
+          kubectl get pods -l app=${{ env.HELM_RELEASE }}-processor
