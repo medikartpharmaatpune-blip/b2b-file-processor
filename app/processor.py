@@ -1,5 +1,6 @@
 import logging
 import os
+import uuid
 from google.cloud import storage
 
 logger = logging.getLogger(__name__)
@@ -13,7 +14,6 @@ def _storage_client():
     """Return a GCS client — points to emulator if env var is set."""
     emulator_host = os.environ.get("STORAGE_EMULATOR_HOST")
     if emulator_host:
-        # fake-gcs-server needs the full URL including scheme
         return storage.Client(
             project=os.environ["GCP_PROJECT_ID"],
             client_options={"api_endpoint": f"http://{emulator_host}"}
@@ -21,31 +21,73 @@ def _storage_client():
     return storage.Client()
 
 
-def process_file(file_name: str) -> dict:
+def process_file(file_name: str, correlation_id: str = None) -> dict:
+    """
+    Download file from input bucket, validate, write to output bucket.
+    Returns a result dict — never raises, always returns status.
+    correlation_id traces this file through all log lines.
+    """
+    if not correlation_id:
+        correlation_id = str(uuid.uuid4())[:8]
+
+    # Every log from this function carries the correlation_id
+    log = logging.LoggerAdapter(logger, {
+        "correlation_id": correlation_id,
+        "file": file_name
+    })
+
     client = _storage_client()
 
+    # --- download ---
     try:
         blob    = client.bucket(INPUT_BUCKET).blob(file_name)
         content = blob.download_as_bytes()
-        logger.info("downloaded", extra={"file": file_name, "bytes": len(content)})
+        log.info("downloaded", extra={"bytes": len(content)})
     except Exception as e:
-        logger.error("download_failed", extra={"file": file_name, "error": str(e)})
-        return {"status": "error", "stage": "download", "file": file_name}
+        log.error("download_failed", extra={"error": str(e)})
+        return {
+            "status": "error",
+            "stage": "download",
+            "file": file_name,
+            "correlation_id": correlation_id
+        }
 
+    # --- validate ---
     ext = os.path.splitext(file_name)[1].lower()
     if ext not in VALID_EXTENSIONS:
-        logger.warning("invalid_extension", extra={"file": file_name, "ext": ext})
-        return {"status": "rejected", "reason": "unsupported_extension", "file": file_name}
+        log.warning("invalid_extension", extra={"ext": ext})
+        return {
+            "status": "rejected",
+            "reason": "unsupported_extension",
+            "file": file_name,
+            "correlation_id": correlation_id
+        }
 
     if len(content) == 0:
-        logger.warning("empty_file", extra={"file": file_name})
-        return {"status": "rejected", "reason": "empty_file", "file": file_name}
+        log.warning("empty_file")
+        return {
+            "status": "rejected",
+            "reason": "empty_file",
+            "file": file_name,
+            "correlation_id": correlation_id
+        }
 
+    # --- route to output ---
     try:
         out_blob = client.bucket(OUTPUT_BUCKET).blob(f"processed/{file_name}")
         out_blob.upload_from_string(content)
-        logger.info("routed", extra={"file": file_name, "destination": OUTPUT_BUCKET})
-        return {"status": "success", "file": file_name}
+        log.info("routed", extra={"destination": OUTPUT_BUCKET})
+        return {
+            "status": "success",
+            "file": file_name,
+            "correlation_id": correlation_id,
+            "bytes": len(content)
+        }
     except Exception as e:
-        logger.error("upload_failed", extra={"file": file_name, "error": str(e)})
-        return {"status": "error", "stage": "upload", "file": file_name}
+        log.error("upload_failed", extra={"error": str(e)})
+        return {
+            "status": "error",
+            "stage": "upload",
+            "file": file_name,
+            "correlation_id": correlation_id
+        }

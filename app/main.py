@@ -3,6 +3,7 @@ import logging
 import os
 import base64
 import threading
+import uuid
 from flask import Flask, jsonify
 from google.cloud import pubsub_v1
 from app.processor import process_file
@@ -16,11 +17,11 @@ class JsonFormatter(logging.Formatter):
             "msg":   record.getMessage(),
         }
         for key, val in record.__dict__.items():
-            if key not in ("name", "msg", "args", "levelname", "levelno", "pathname",
-                           "filename", "module", "exc_info", "exc_text", "stack_info",
-                           "lineno", "funcName", "created", "msecs", "relativeCreated",
-                           "thread", "threadName", "processName", "process", "message",
-                           "taskName", "asctime"):
+            if key not in ("name","msg","args","levelname","levelno","pathname",
+                           "filename","module","exc_info","exc_text","stack_info",
+                           "lineno","funcName","created","msecs","relativeCreated",
+                           "thread","threadName","processName","process","message",
+                           "taskName","asctime"):
                 log[key] = val
         if record.exc_info:
             log["traceback"] = self.formatException(record.exc_info)
@@ -42,49 +43,68 @@ health_app = Flask(__name__)
 def health():
     return jsonify({"status": "ok"}), 200
 
+@health_app.route("/ready")
+def ready():
+    return jsonify({"status": "ready"}), 200
+
 def run_health_server():
     logger.info("health_server_starting", extra={"port": 8080})
     health_app.run(host="0.0.0.0", port=8080, use_reloader=False)
 
-# ── Message handling ──────────────────────────────────────────────────────
+# ── Message decoding ──────────────────────────────────────────────────────
 def decode_message_data(raw: bytes) -> dict:
     try:
         return json.loads(base64.b64decode(raw).decode())
     except Exception:
         return json.loads(raw.decode())
 
-
+# ── Message handler ───────────────────────────────────────────────────────
 def handle_message(message: pubsub_v1.subscriber.message.Message) -> None:
-    try:
-        raw = message.data
-        logger.info("raw_message", extra={"raw": raw.decode("utf-8", errors="replace")})
+    # Generate correlation ID at the earliest possible point
+    correlation_id = str(uuid.uuid4())[:8]
 
+    try:
+        raw       = message.data
         data      = decode_message_data(raw)
         file_name = data.get("name", "")
-        logger.info("received", extra={"file": file_name})
 
-        result = process_file(file_name)
+        logger.info("message_received", extra={
+            "correlation_id": correlation_id,
+            "file": file_name,
+            "message_id": message.message_id
+        })
+
+        result = process_file(file_name, correlation_id=correlation_id)
 
         if result["status"] in ("success", "rejected"):
             message.ack()
+            logger.info("message_acked", extra={
+                "correlation_id": correlation_id,
+                "file": file_name,
+                "status": result["status"]
+            })
         else:
             message.nack()
-
-        logger.info("processed", extra=result)
+            logger.warning("message_nacked", extra={
+                "correlation_id": correlation_id,
+                "file": file_name,
+                "status": result["status"],
+                "stage": result.get("stage")
+            })
 
     except Exception:
-        logger.error("handler_error", exc_info=True)
+        logger.error("handler_error", exc_info=True, extra={
+            "correlation_id": correlation_id
+        })
         message.nack()
 
 
 def main():
-    # Start health server in background FIRST
-    # K8s readiness probe hits /health at 5s — must be up before then
+    # Health server starts FIRST — K8s readiness probe needs it up
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
     logger.info("health_server_started")
 
-    # Then connect to Pub/Sub
     subscriber = pubsub_v1.SubscriberClient()
     sub_path   = subscriber.subscription_path(PROJECT_ID, SUBSCRIPTION)
     logger.info("starting", extra={"subscription": sub_path})
